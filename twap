@@ -1,0 +1,93 @@
+### TWAP
+###time_interval:5min
+
+M_TICKER = '000776'
+M_EXCHANGE = EXCHANGE.SZE
+SOURCE_INDEX = SOURCE.XTP
+
+import numpy as np
+import pandas as pd
+from pandas.tseries.offsets import Minute
+
+def text_save(content,filename,mode='a'):
+    file = open(filename,mode)
+    file.write(content)
+    file.close()
+
+def check(context):
+    if context.trade_volume < context.volume:
+        context.cancel_rid = context.cancel_order(source=SOURCE_INDEX, order_id=context.limit_rid)
+        print "canceling order: %s" % context.cancel_rid
+        context.market_rid = context.insert_market_order(source=SOURCE_INDEX,
+                                                 ticker=M_TICKER,
+                                                 exchange_id=M_EXCHANGE,
+                                                 volume=(context.volume - context.trade_volume),
+                                                 direction=DIRECTION.Buy,
+                                                 offset=OFFSET.Open)
+        print "puting market order : %s"% context.market_rid
+
+
+def initialize(context):
+    print '--- running ', context.get_name(), '---'
+    context.add_md(source=SOURCE_INDEX)
+    context.add_td(source=SOURCE_INDEX)
+    context.subscribe(tickers=[M_TICKER], source=SOURCE_INDEX)
+    context.register_bar(source=SOURCE_INDEX,min_interval=1,start_time='13:00:00', end_time='15:00:00')
+    context.volume = 100
+    context.prev_t = context.parse_nano(context.get_nano())
+    context.tseries = pd.date_range('3/16/2018 13:00:00', '3/16/2018 14:57:00', freq='5min').map(lambda x: str(x)).values
+    context.tseries = context.tseries[context.tseries > context.prev_t]
+    context.next_t = context.tseries[0]
+    context.tick_price = []
+    context.bar_price = []
+    print 'initialization done'
+
+
+def on_pos(context, pos_handler, request_id, source, rcv_time):
+    if request_id == -1:
+        context.log_info("td connection")
+        if pos_handler is None:
+            context.log_info("initializing pos_handler")
+            context.set_pos(context.new_pos(source=source), source=source)
+    else:
+        context.log_debug("[RSP_POS] {}".format(pos_handler.dump()))
+
+
+def on_tick(context, market_data, source, rcv_time):
+    context.tick_price.append([rcv_time,market_data.BidPrice1,market_data.AskPrice1])
+    #print 'tick_price: ',context.tick_price[-1]
+    'current_time:',rcv_time,'bid:',market_data.BidPrice1,'ask:',market_data.AskPrice1
+    text_save(str(context.tick_price[-1][0])+','+str(context.tick_price[-1][1])+','+str(context.tick_price[-1][2])+'\n',r'tick_price.txt')
+    if context.parse_nano(rcv_time) > context.next_t:
+        curr_t  = context.parse_nano(rcv_time)
+        print 'current_time:',curr_t,'rcv_time',rcv_time,'bid:',market_data.BidPrice1,'ask:',market_data.AskPrice1
+        context.limit_rid = context.insert_limit_order(source=SOURCE_INDEX,
+                                                 ticker=M_TICKER,
+                                                 exchange_id=M_EXCHANGE,
+                                                 price=market_data.BidPrice1,
+                                                 volume=context.volume,
+                                                 direction=DIRECTION.Buy,
+                                                 offset=OFFSET.Open)
+        print "putting limit order: %s"% context.limit_rid
+        context.trade_volume = 0
+        context.next_t = context.tseries[context.tseries>curr_t][0]
+        print context.next_t
+        context.insert_func_after_c(240, check)
+        
+
+def on_bar(context, bars, min_interval, source, rcv_time):
+    for ticker, bar in bars.items():
+        print ticker, 'o', bar.Open, 'h', bar.High, 'l', bar.Low, 'c', bar.Close,'vol',bar.Volume
+        context.bar_price.append([rcv_time,bar.Open,bar.Close,bar.Volume])
+        print 'bar_price: ',context.bar_price[-1]
+        text_save(str(context.bar_price[-1][0])+','+str(context.bar_price[-1][1])+','+str(context.bar_price[-1][2])+','+str(context.bar_price[-1][3])+'\n',r'bar_price.txt')
+
+def on_rtn_trade(context, rtn_trade, order_id, source, rcv_time):
+    context.log_debug("[TRADE] (t){} (p){} (v){} POS:{}".format(
+        rtn_trade.InstrumentID, rtn_trade.Price, rtn_trade.Volume,
+        context.get_pos(source=SOURCE_INDEX).dump()))
+    if context.limit_rid == order_id:
+        context.trade_volume += rtn_trade.Volume
+        print 'buying %s shares by limit order' % rtn_trade.Volume
+    else:
+        print 'market order success, buying price:%s' % rtn_trade.Price 
